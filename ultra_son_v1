@@ -1,45 +1,322 @@
+/*****************************************************************************/
+/**************** AUTOMATIC CONTROL - POLYTECH SORBONE - JAN 2025 ************/
+/*********************** AUTHORS : L. BRIETZKE & G. MOREL ********************/
+/************************* Sequence 1 - Problem 1 ****************************/
+/**************************** YOU'RE IN CONTROL *******************************/
+/*****************************************************************************/
 
-int trigPin = 12; 
-int echoPin = 11; // defines variables 
+
+// Libraries for CAN communications
+#include <can-serial.h>
+#include <mcp2515_can.h>
+#include <mcp2515_can_dfs.h>
+#include <mcp_can.h>
+#if defined(SEEED_WIO_TERMINAL) && defined(CAN_2518FD)
+const int SPI_CS_PIN = BCM8;
+const int CAN_INT_PIN = BCM25;
+#else
+const int SPI_CS_PIN = 9;
+const int CAN_INT_PIN = 2;
+#endif
+
+#include "mcp2515_can.h"
+mcp2515_can CAN(SPI_CS_PIN);  // Set CS pin
+#define MAX_DATA_SIZE 8
+
+#include <SPI.h>
+#include <math.h>
+
+#define MY_PI 3.14159265359
+
+#define PERIOD_IN_MICROS 5000 // 5 ms
+
+#if !defined(FALSE)
+#define FALSE 0
+#define TRUE 1
+#endif
+
+#define MOTOR_ID 3  // Here change with the motor ID if it has been changed with the firmware.
+#define MOTOR_MAX_VEL_CMD 300000 
+#define MOTOR_MAX_VOLTAGE_CMD 200 
+#define MOTOR_MAX_POS_DEG 120.0
+#define MOTOR_MIN_POS_DEG -120.0
+
+/******************  GLOBAL VARIABLES *********************/
+// Global motor state variables
+int trigPin = 7; 
+int echoPin = 6; // defines variables 
 
 long duration; 
 
 int distance; 
+double currentMotorPosDeg[3];
+double currentMotorVelDegPerSec[3];
+double previousMotorPosDeg[3];
+double currentMotorPosEncoder[3];
+double offsetMotorPosEnconder[3];
+double currentNumOfMotorRevol[3];
 
-void setup() 
 
-{
 
-pinMode(trigPin, OUTPUT); // Sets the trigPin as an Output 
+// General purpose global variables
+int counterForPrinting;
+int printingPeriodicity;
+unsigned long current_time, old_time, initial_time;
 
-pinMode(echoPin, INPUT); // Sets the echoPin as an Input 
+void motorON(int motor_ID){
+  unsigned char msg[MAX_DATA_SIZE] = {
+    0x88,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00
+  };
 
-Serial.begin(9600); // Starts the serial communication
+  CAN.sendMsgBuf(0x140+motor_ID, 0, 8, msg); 
 
- } 
+}
 
-void loop() 
+void motorOFF(int motor_ID){
 
-{ 
+  unsigned char msg[MAX_DATA_SIZE] = {
+    0x80,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00
+  };
 
-// Clears the trigPin 
+  CAN.sendMsgBuf(0x140+motor_ID, 0, 8, msg); 
 
-digitalWrite(trigPin, LOW); 
+}
 
-delayMicroseconds(2); // Sets the trigPin on HIGH state for 10 micro seconds 
+/*** This function sends a velocity command. Unit = hundredth of degree per second *****/
+void sendVelocityCommand(long int vel, int motor_ID) {
 
-digitalWrite(trigPin, HIGH); 
+  long int local_velocity;
+  local_velocity = vel;
 
-delayMicroseconds(10); 
+  unsigned char *adresse_low = (unsigned char *)(&local_velocity);
 
-digitalWrite(trigPin, LOW); // Reads the echoPin, returns the sound wave travel time in microseconds 
+  unsigned char msg[MAX_DATA_SIZE] = {
+    0xA2,
+    0x00,
+    0x00,
+    0x00,
+    *(adresse_low),
+    *(adresse_low + 1),
+    *(adresse_low + 2),
+    *(adresse_low + 3)
 
-duration = pulseIn(echoPin, HIGH); // Calculating the distance 
+  };
 
-distance = duration * 0.034 / 2; // Prints the distance on the Serial Monitor 
+  CAN.sendMsgBuf(0x140+motor_ID, 0, 8, msg); 
+}
 
-Serial.print("Distance: "); 
 
-Serial.println(distance); 
+/*** This function reads the motor states and affects the following global variables *****/
+/*     previousMotorPosDeg : previous position in Deg (set to the new value, will be "previous" for next call);
+/*     currentNumOfMotorRevol = number of  revoutions (old value +/- 1 if one jump has been observed ont the encoder read)
+/*     currentEncodPos = current Encoder Pos value (read)
+/*     currentMotorPosDeg = Motor position in degrees
+/*     currentMotorVelDegPerSec = Motor position velocity in degrees per s
+***********************************************************************/
 
+void readMotorState(int motor_ID)  {
+  uint32_t id;
+  uint8_t type;
+  uint8_t len;
+  byte cdata[MAX_DATA_SIZE] = { 0 };
+  int data2_3, data4_5, data6_7;
+  double currentMotorVelRaw[3];
+
+  // wait for data
+  while (CAN_MSGAVAIL != CAN.checkReceive())
+    ;
+
+  // read data, len: data length, buf: data buf
+  CAN.readMsgBuf(&len, cdata);
+
+  id = CAN.getCanId();
+  type = (CAN.isExtendedFrame() << 0) | (CAN.isRemoteRequest() << 1);
+
+  // Check if the received ID matches the motor ID
+  if ((id - 0x140) == motor_ID) { 
+    data4_5 = cdata[4] + pow(2, 8) * cdata[5];
+    currentMotorVelRaw[motor_ID - 1] = (double)data4_5;
+    data6_7 = cdata[6] + pow(2, 8) * cdata[7];
+    currentMotorPosEncoder[motor_ID - 1] = (double)data6_7;
+  }
+
+  // Conversion of the velocity and writing in the global cariable
+  currentMotorVelDegPerSec[motor_ID - 1] = ((double)(currentMotorVelRaw[motor_ID - 1]));
+
+  // Conversion of the position (with motor revolution counting) and wirting in the global variable
+  currentMotorPosEncoder[motor_ID - 1] -= offsetMotorPosEnconder[motor_ID - 1];
+  currentMotorPosDeg[motor_ID - 1] = ((double)(currentNumOfMotorRevol[motor_ID - 1]) * 360.0) + (((double)currentMotorPosEncoder[motor_ID - 1]) * 180.0 / 32768.0);  // On convertit en degré
+  Serial.print("MOTOR ");
+  Serial.print(motor_ID);
+  Serial.print(", PosDegAvantRetcif ");
+  Serial.print(currentMotorPosDeg[motor_ID - 1]);
+
+  if ((currentMotorPosDeg[motor_ID - 1] - previousMotorPosDeg[motor_ID - 1]) < -20.0) {
+    currentNumOfMotorRevol[motor_ID - 1]++;
+    currentMotorPosDeg[motor_ID - 1] = ((double)(currentNumOfMotorRevol[motor_ID - 1])) * 360.0 + ((double)currentMotorPosEncoder[motor_ID - 1]) * 180.0 / 32768.0;
+    Serial.print(", PosDegAprèsRetcif ");
+    Serial.print(currentMotorPosDeg[motor_ID - 1]);
+  }
+  if ((currentMotorPosDeg[motor_ID - 1] - previousMotorPosDeg[motor_ID - 1]) > 20.0) {
+    currentNumOfMotorRevol[motor_ID - 1]--;
+    currentMotorPosDeg[motor_ID - 1] = ((double)(currentNumOfMotorRevol[motor_ID - 1])) * 360.0 + ((double)currentMotorPosEncoder[motor_ID - 1]) * 180.0 / 32768.0;
+    Serial.print(", PosDegAprèsRetcif ");
+    Serial.print(currentMotorPosDeg[motor_ID - 1]);
+  }
+  Serial.println("");  
+  previousMotorPosDeg[motor_ID - 1] = currentMotorPosDeg[motor_ID - 1]; // writing in the global variable for next call
+}
+
+
+/********************* THIS FUNCTION IS EXECUTED FIRST AND CONTAINS INITIALIZATION ***********/
+void setup() {
+  int i;
+  char serialReceivedChar;
+  int nothingReceived;
+  pinMode(trigPin, OUTPUT); // Sets the trigPin as an Output 
+
+  pinMode(echoPin, INPUT); 
+
+  // Initialization of the serial link
+  Serial.begin(115200);
+
+
+  // Initialization of the CAN communication. THis will wait until the motor is powered on
+  while (CAN_OK != CAN.begin(CAN_500KBPS)) {
+    Serial.println("CAN init fail, retry ...");
+    delay(500);
+  }
+
+
+  Serial.println("");
+  Serial.println("");
+  Serial.println("");
+  Serial.println("");
+  Serial.println("");
+  Serial.println("***********************************************************************");
+  Serial.println("*********************************222**************************************");
+  Serial.println("***********************************************************************");
+  Serial.println(" Serial link and CAN initialization went ok! Power ON the motor");
+  Serial.println("***********************************************************************");
+  Serial.println("***********************************************************************");
+  Serial.println("***********************************************************************");
+  Serial.println("***********************************************************************");
+  Serial.println("");
+
+
+  // Initialization of the motor command and the position measurement variables
+  for(int i = 0 ; i < 3; i++){
+    previousMotorPosDeg[i] = 0.0;
+    currentNumOfMotorRevol[i] = 0;
+    offsetMotorPosEnconder[i] = 0;
+  }
+  // Send motot off then motor on command to reset
+  motorOFF(1);
+  readMotorState(1);
+  motorOFF(2);
+  readMotorState(2);
+  motorOFF(3);
+  readMotorState(3);
+  Serial.println("");
+  Serial.println("***********************************************************************");
+  Serial.println(" Turn the rotor in its ZERO position they type 'S'");
+  Serial.println("***********************************************************************");
+
+  nothingReceived = TRUE;
+  while (nothingReceived==TRUE){
+    serialReceivedChar = Serial.read();
+    if(serialReceivedChar == 'S') {
+      nothingReceived = FALSE;
+    }
+  }
+
+  motorON(1);
+  readMotorState(1);
+  motorON(2);
+  readMotorState(2);
+  motorON(3);
+  readMotorState(3);
+  delay(500);
+  
+  sendVelocityCommand((long int)(0),1);
+  readMotorState(1); 
+  sendVelocityCommand((long int)(0),2);
+  readMotorState(2); 
+  sendVelocityCommand((long int)(0),3);
+  readMotorState(3);
+  delay(500);
+
+
+  for(int i = 0; i < 3; i++){
+    offsetMotorPosEnconder[i] = currentMotorPosEncoder[i];
+    currentNumOfMotorRevol[i] = 0;
+    previousMotorPosDeg[i] = 0.0;
+  }
+  sendVelocityCommand((long int)(0),1);
+  readMotorState(1); 
+  sendVelocityCommand((long int)(0),2);
+  readMotorState(2); 
+  sendVelocityCommand((long int)(0),3);
+  readMotorState(3); 
+  delay(500);
+ 
+  
+
+  Serial.println("End of Initialization routine.");
+  counterForPrinting = 0;
+  printingPeriodicity = 5; // The variables will be sent to the serial link one out of printingPeriodicity loop runs.  
+  current_time = micros(); 
+  initial_time=current_time;
+}
+
+
+void loop() {
+  int i;
+  double consigne;
+  unsigned int sleep_time;
+  double elapsed_time_in_s;
+  double motorVelocityCommandInDegPerSec;
+  double gainPotValToVel;
+  
+  digitalWrite(trigPin, LOW); 
+
+  //delayMicroseconds(2); // Sets the trigPin on HIGH state for 10 micro seconds 
+
+  digitalWrite(trigPin, HIGH); 
+
+  //delayMicroseconds(10); 
+
+  digitalWrite(trigPin, LOW); // Reads the echoPin, returns the sound wave travel time in microseconds 
+
+  //duration = pulseIn(echoPin, HIGH); // Calculating the distance 
+
+  distance = duration * 0.034 / 2; // Prints the distance on the Serial Monitor 
+  
+
+  sendVelocityCommand(10000, 1);
+  readMotorState(1);
+  sendVelocityCommand(10000, 2);
+  readMotorState(2);
+  sendVelocityCommand(10000, 3);
+  readMotorState(3);
+  Serial.println("Motor 1:");
+  Serial.println(currentMotorPosDeg[0]);
+  Serial.println("Motor 2:");
+  Serial.println(currentMotorPosDeg[1]);
+  Serial.println("Motor 3:");
+  Serial.println(currentMotorPosDeg[2]);
 }
