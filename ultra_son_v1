@@ -1,11 +1,3 @@
-/*****************************************************************************/
-/**************** AUTOMATIC CONTROL - POLYTECH SORBONE - JAN 2025 ************/
-/*********************** AUTHORS : L. BRIETZKE & G. MOREL ********************/
-/************************* Sequence 1 - Problem 1 ****************************/
-/**************************** YOU'RE IN CONTROL *******************************/
-/*****************************************************************************/
-
-
 // Libraries for CAN communications
 #include <can-serial.h>
 #include <mcp2515_can.h>
@@ -98,13 +90,11 @@ int test3 = 0;
 int test4 = 0;
 double dist_rep = 0;
 double dist_rep_f = 0;
-double dist_f_c = 0;
 
 int x_rep = 0;
 int y_rep = 0;
 
 int cpt = 0;
-double ne = -1;
 double alpha_prim = 0;
 
 double h = 9.1; 
@@ -300,21 +290,6 @@ void setup() {
   motorOFF(3);
   readMotorState(3);
   Serial.println("ok");  
-  
-/*
-  Serial.println("");
-  Serial.println("***********************************************************************");
-  Serial.println(" Turn the rotor in its ZERO position they type 'S'");
-  Serial.println("***********************************************************************");
-
-  nothingReceived = TRUE;
-  while (nothingReceived==TRUE){
-    serialReceivedChar = Serial.read();
-    if(serialReceivedChar == 'S') {
-      nothingReceived = FALSE;
-    }
-  }
-*/
 
  /* int begin = 0;
   while(begin < 900){
@@ -370,7 +345,6 @@ void setup() {
 
 
 void pince(){
-  Serial.println(pos);
   if(pos == 0){
     for (pos = 0; pos <= 180; pos += 1) { // goes from 0 degrees to 180 degrees
       // in steps of 1 degree
@@ -422,7 +396,7 @@ void loop() {
   delayMicroseconds(10); 
   digitalWrite(trigPin_f, LOW);
   duration = pulseIn(echoPin_f, HIGH); 
-  distance_f = (duration * 0.034 / 2) + dist_f_c;
+  distance_f = (duration * 0.034 / 2) + dist_roue_pince;
 
   digitalWrite(trigPin_r, LOW); 
   delayMicroseconds(2);
@@ -450,7 +424,7 @@ void loop() {
       if(test == 0){
         for (pos = 180; pos >= 0; pos -= 1) { 
           myservo.write(pos);             
-          delay(15);                      
+          delay(5);                      
         }
           pos = 0;
           x = 150 - (distance_f - d_capt_roue);
